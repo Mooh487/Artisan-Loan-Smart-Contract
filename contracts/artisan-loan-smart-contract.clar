@@ -88,3 +88,80 @@
 (define-private (calculate-required-collateral (amount uint))
   (/ (* amount collateral-ratio) u100)
 )
+
+
+
+(define-private (update-credit-score (borrower principal) (is-good-payment bool))
+  (let (
+    (current-score (get-credit-score borrower))
+    (score-change (if is-good-payment u1 u2))
+    (new-score (if is-good-payment
+                 (min-uint (+ current-score score-change) max-credit-score)
+                 (max-uint (if (> current-score score-change) 
+                           (- current-score score-change) 
+                           min-credit-score) 
+                         min-credit-score)))
+  )
+    (map-set credit-scores borrower new-score)
+    new-score
+  )
+)
+
+;; Public functions
+
+;; Initialize credit score for new borrower
+(define-public (initialize-credit-score)
+  (begin
+    (asserts! (is-none (map-get? credit-scores tx-sender)) err-loan-active)
+    (map-set credit-scores tx-sender u50)
+    (ok true)
+  )
+)
+
+;; Deposit collateral
+(define-public (deposit-collateral (amount uint))
+  (let (
+    (current-collateral (get-collateral tx-sender))
+  )
+    (map-set collateral-deposits tx-sender (+ current-collateral amount))
+    (ok true)
+  )
+)
+
+;; Create a new loan
+(define-public (create-loan (amount uint) (term-length uint))
+  (let (
+    (credit-score (get-credit-score tx-sender))
+    (interest-rate (calculate-interest-rate credit-score))
+    (required-collateral (calculate-required-collateral amount))
+    (daily-repayment (/ (* amount (+ u100 interest-rate)) (* u100 term-length)))
+  )
+    (asserts! (is-none (get-loan tx-sender)) err-loan-active)
+    (asserts! (<= amount max-loan-amount) err-invalid-amount)
+    (asserts! (>= amount min-loan-amount) err-invalid-amount)
+    (asserts! (<= term-length max-loan-term) err-invalid-term)
+    (asserts! (>= (get-collateral tx-sender) required-collateral) err-insufficient-collateral)
+    (asserts! (>= daily-repayment min-daily-repayment) err-invalid-repayment)
+    
+    (map-set loans
+      { borrower: tx-sender }
+      {
+        amount: amount,
+        start-date: block-height,
+        term-length: term-length,
+        daily-repayment: daily-repayment,
+        total-repaid: u0,
+        interest-rate: interest-rate,
+        collateral-amount: required-collateral,
+        active: true,
+        last-payment-date: block-height,
+        missed-payments: u0,
+        credit-score: credit-score
+      }
+    )
+    (map-set balances tx-sender amount)
+    (ok true)
+  )
+)
+
+
