@@ -165,3 +165,83 @@
 )
 
 
+;; Make a repayment with various checks and penalties
+(define-public (make-repayment (amount uint))
+  (let (
+    (loan (unwrap! (get-loan tx-sender) err-not-found))
+    (days-since-last-payment (- block-height (get last-payment-date loan)))
+    (is-late (> days-since-last-payment grace-period))
+    (penalty (if is-late (* penalty-rate days-since-last-payment) u0))
+    (new-total-repaid (+ (get total-repaid loan) amount))
+    (remaining-term (- (+ (get start-date loan) (get term-length loan)) block-height))
+  )
+    (asserts! (get active loan) err-not-found)
+    (asserts! (<= amount (get-balance tx-sender)) err-insufficient-balance)
+    
+    ;; Apply early repayment fee if applicable
+    (let (
+      (early-repayment-fee (if (> remaining-term u0)
+                            (* amount early-repayment-fee-rate)
+                            u0))
+      (total-payment (+ amount penalty early-repayment-fee))
+    )
+      (asserts! (<= total-payment (get-balance tx-sender)) err-insufficient-balance)
+      
+      ;; Update loan details
+      (map-set loans
+        { borrower: tx-sender }
+        (merge loan {
+          total-repaid: new-total-repaid,
+          last-payment-date: block-height,
+          missed-payments: (if is-late 
+                            (+ (get missed-payments loan) u1)
+                            (get missed-payments loan))
+        })
+      )
+      
+      ;; Update credit score
+      (update-credit-score tx-sender (not is-late))
+      
+      ;; Update balance
+      (map-set balances 
+        tx-sender 
+        (- (get-balance tx-sender) total-payment))
+        
+      ;; Check if loan is fully repaid
+      (if (>= new-total-repaid (get amount loan))
+        (begin
+          (map-set loans 
+            { borrower: tx-sender } 
+            (merge loan { active: false }))
+          ;; Return collateral
+          (map-set collateral-deposits
+            tx-sender
+            (+ (get-collateral tx-sender) (get collateral-amount loan)))
+        )
+        true
+      )
+      (ok true)
+    )
+  )
+)
+
+;; Repossess a loan with enhanced checks
+(define-public (repossess-loan (borrower principal))
+  (let (
+    (loan (unwrap! (get-loan borrower) err-not-found))
+    (days-since-last-payment (- block-height (get last-payment-date loan)))
+  )
+    (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+    (asserts! (> days-since-last-payment u30) err-late-penalty)
+    (asserts! (> (get missed-payments loan) u5) err-loan-not-due)
+    
+    ;; Seize collateral and close loan
+    (map-set loans { borrower: borrower } (merge loan { active: false }))
+    (map-set collateral-deposits borrower u0)
+    (map-set balances borrower u0)
+    
+    ;; Update credit score severely
+    (update-credit-score borrower false)
+    (ok true)
+  )
+)
